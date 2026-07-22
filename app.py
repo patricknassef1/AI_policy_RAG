@@ -3,12 +3,10 @@ app.py - FastAPI RAG API
 """
 
 import os
-import json
 from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sentence_transformers import SentenceTransformer
@@ -29,16 +27,15 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 MODEL_ID = os.getenv(
     "MODEL_ID",
-    "openai/gpt-oss-120b"
+    "meta-llama/Llama-3.1-8B-Instruct"
 )
-
-
 
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError(
         "Missing SUPABASE_URL or SUPABASE_KEY environment variables"
     )
+
 
 if not HF_TOKEN:
     raise RuntimeError(
@@ -62,9 +59,9 @@ embedder = SentenceTransformer(
     EMBED_MODEL
 )
 
+
 client = InferenceClient(
-    model=MODEL_ID,
-    token=HF_TOKEN
+    api_key=HF_TOKEN
 )
 
 
@@ -124,6 +121,7 @@ def retrieve_context(
         .tolist()
     )
 
+
     result = supabase.rpc(
         "match_documents",
         {
@@ -131,6 +129,7 @@ def retrieve_context(
             "match_count": top_k,
         },
     ).execute()
+
 
     return result.data or []
 
@@ -164,8 +163,14 @@ Content:
     ]
 
 
+    # only add valid history messages
     if history:
-        messages.extend(history)
+        valid_history = [
+            msg for msg in history
+            if msg.get("role") and msg.get("content")
+        ]
+
+        messages.extend(valid_history)
 
 
     messages.append(
@@ -241,19 +246,36 @@ def ask(request: AskRequest):
     )
 
 
-    response = client.chat.completions.create(
-        messages=messages,
-        max_tokens=800,
-        temperature=0.3,
-    )
+    try:
+
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=messages,
+            max_tokens=800,
+            temperature=0.3,
+        )
+
+
+        answer = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
+
+
+    except Exception as e:
+
+        print("HUGGINGFACE ERROR:", e)
+
+        return AskResponse(
+            answer=f"Model service error: {str(e)}",
+            sources=sources
+        )
 
 
     return AskResponse(
-        answer=response
-        .choices[0]
-        .message
-        .content,
-
+        answer=answer,
         sources=sources
     )
 
