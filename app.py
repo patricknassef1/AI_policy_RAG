@@ -12,15 +12,16 @@ from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from supabase import create_client
 from groq import Groq
+
 from dotenv import load_dotenv
 
 
 load_dotenv()
 
 
-# ==============================
+# =========================
 # CONFIG
-# ==============================
+# =========================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -34,11 +35,6 @@ MODEL_ID = os.getenv(
 )
 
 
-TOP_K = 4
-
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-
-
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
 
@@ -50,9 +46,16 @@ if not GROQ_API_KEY:
 
 
 
-# ==============================
+TOP_K = 4
+
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+
+
+# =========================
 # CLIENTS
-# ==============================
+# =========================
+
 
 supabase = create_client(
     SUPABASE_URL,
@@ -65,7 +68,9 @@ groq_client = Groq(
 )
 
 
-# Lazy model loading
+
+# Lazy loading to prevent startup OOM
+
 embedder = None
 
 
@@ -73,43 +78,48 @@ def get_embedder():
 
     global embedder
 
+
     if embedder is None:
 
         print("Loading embedding model...")
+
 
         embedder = SentenceTransformer(
             EMBED_MODEL,
             device="cpu"
         )
 
+
         print("Embedding model loaded")
+
 
     return embedder
 
 
 
-# ==============================
+# =========================
 # PROMPT
-# ==============================
+# =========================
+
 
 SYSTEM_PROMPT = """
-You are a helpful assistant answering questions using only the provided documents.
+You are a helpful assistant answering questions based only on the provided documents.
 
 Rules:
-
-1. Use only the context provided.
-2. The user may use different wording than the document.
-3. Match meaning, not exact keywords.
-4. If the answer exists in the context, explain it clearly.
-5. Only say "I couldn't find this information in the documents" if the context does not contain the answer.
+1. Use ONLY the provided context.
+2. Understand different wording and synonyms.
+3. If the answer exists in the context, explain it clearly.
+4. Do not say you cannot find information if the answer is available with different wording.
+5. Only say "I couldn't find this information in the documents" when the context does not contain the answer.
 6. Never invent information.
 """
 
 
 
-# ==============================
+# =========================
 # APP
-# ==============================
+# =========================
+
 
 app = FastAPI(
     title="RAG API",
@@ -117,20 +127,19 @@ app = FastAPI(
 )
 
 
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 
-# ==============================
+# =========================
 # SCHEMAS
-# ==============================
+# =========================
+
 
 class AskRequest(BaseModel):
 
@@ -148,16 +157,18 @@ class AskResponse(BaseModel):
 
 
 
-# ==============================
+# =========================
 # EMBEDDING
-# ==============================
+# =========================
 
-def embed_query(question: str):
+
+def embed_query(query: str):
 
     model = get_embedder()
 
+
     embedding = model.encode(
-        "query: " + question,
+        "query: " + query,
         normalize_embeddings=True
     )
 
@@ -166,16 +177,33 @@ def embed_query(question: str):
 
 
 
-# ==============================
+# =========================
 # RETRIEVAL
-# ==============================
+# =========================
+
 
 def retrieve_context(
     query: str,
-    top_k=TOP_K
+    top_k: int = TOP_K
 ):
 
-    query_embedding = embed_query(query)
+    print("Creating embedding...")
+
+
+    query_embedding = embed_query(
+        query
+    )
+
+
+    print(
+        "Embedding size:",
+        len(query_embedding)
+    )
+
+
+    print(
+        "Searching Supabase..."
+    )
 
 
     result = supabase.rpc(
@@ -191,7 +219,8 @@ def retrieve_context(
 
 
     print(
-        f"Retrieved chunks: {len(chunks)}"
+        "Retrieved chunks:",
+        len(chunks)
     )
 
 
@@ -199,9 +228,10 @@ def retrieve_context(
 
 
 
-# ==============================
-# BUILD PROMPT
-# ==============================
+# =========================
+# MESSAGE BUILDER
+# =========================
+
 
 def build_messages(
     question,
@@ -209,14 +239,15 @@ def build_messages(
     history=None
 ):
 
+
     context = "\n\n".join(
         [
             f"""
 Source:
-{chunk["metadata"].get("source")}
+{chunk['metadata'].get('source')}
 
 Content:
-{chunk["content"]}
+{chunk['content']}
 """
             for chunk in chunks
         ]
@@ -224,10 +255,12 @@ Content:
 
 
     messages = [
+
         {
             "role": "system",
             "content": SYSTEM_PROMPT
         }
+
     ]
 
 
@@ -243,9 +276,12 @@ Content:
         )
 
 
+
     messages.append(
+
         {
             "role": "user",
+
             "content": f"""
 Context:
 
@@ -257,9 +293,10 @@ Question:
 {question}
 
 
-Answer:
+Answer using only the context.
 """
         }
+
     )
 
 
@@ -267,18 +304,22 @@ Answer:
 
 
 
-# ==============================
+# =========================
 # ROUTES
-# ==============================
+# =========================
 
 
 @app.get("/")
-def health():
+def health_check():
 
     return {
+
         "status": "ok",
+
         "message": "RAG API running"
+
     }
+
 
 
 
@@ -288,7 +329,15 @@ def health():
 )
 def ask(request: AskRequest):
 
+
     try:
+
+
+        print(
+            "Question:",
+            request.question
+        )
+
 
         chunks = retrieve_context(
             request.question
@@ -298,30 +347,46 @@ def ask(request: AskRequest):
         if not chunks:
 
             return AskResponse(
+
                 answer="I couldn't find this information in the documents.",
+
                 sources=[]
+
             )
 
 
 
         messages = build_messages(
+
             request.question,
+
             chunks,
+
             request.history
+
         )
 
 
 
         sources = list(
+
             {
                 c["metadata"].get(
                     "source",
                     "unknown"
                 )
+
                 for c in chunks
+
             }
+
         )
 
+
+
+        print(
+            "Calling Groq..."
+        )
 
 
         response = groq_client.chat.completions.create(
@@ -333,36 +398,36 @@ def ask(request: AskRequest):
             max_tokens=800,
 
             temperature=0.3
+
         )
 
 
+        answer = response.choices[0].message.content
 
-        answer = (
-            response
-            .choices[0]
-            .message
-            .content
-        )
 
 
         return AskResponse(
+
             answer=answer,
+
             sources=sources
+
         )
 
 
 
     except Exception as e:
 
+
         print(
-            "ERROR:",
-            str(e)
+            "FULL ERROR:",
+            repr(e)
         )
 
 
         return AskResponse(
 
-            answer=f"Error: {str(e)}",
+            answer=f"Server error: {str(e)}",
 
             sources=[]
 
@@ -370,9 +435,10 @@ def ask(request: AskRequest):
 
 
 
-# ==============================
+# =========================
 # START SERVER
-# ==============================
+# =========================
+
 
 if __name__ == "__main__":
 
