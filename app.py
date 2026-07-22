@@ -77,14 +77,6 @@ Rules:
 4. Do not say "I couldn't find this information" if the answer is present in the context but phrased differently.
 5. Only say "I couldn't find this information in the documents" when the retrieved context truly does not contain relevant information.
 6. Do not make up information that is not supported by the context.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer:
 """
 
 # ---------------- APP ----------------
