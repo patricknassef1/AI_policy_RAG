@@ -32,10 +32,7 @@ MODEL_ID = os.getenv(
     "openai/gpt-oss-120b"
 )
 
-PROVIDER = os.getenv(
-    "PROVIDER",
-    "fireworks-ai"
-)
+
 
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -65,11 +62,9 @@ embedder = SentenceTransformer(
     EMBED_MODEL
 )
 
-
 client = InferenceClient(
     model=MODEL_ID,
-    provider=PROVIDER,
-    api_key=HF_TOKEN
+    token=HF_TOKEN
 )
 
 
