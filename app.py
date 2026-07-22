@@ -15,19 +15,15 @@ from groq import Groq
 
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 
-# =========================
-# CONFIG
-# =========================
+# ---------------- CONFIG ----------------
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 
 MODEL_ID = os.getenv(
     "GROQ_MODEL_ID",
@@ -35,27 +31,23 @@ MODEL_ID = os.getenv(
 )
 
 
-if not SUPABASE_URL:
-    raise RuntimeError("Missing SUPABASE_URL")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError(
+        "Missing SUPABASE_URL or SUPABASE_KEY environment variables"
+    )
 
-if not SUPABASE_KEY:
-    raise RuntimeError("Missing SUPABASE_KEY")
 
 if not GROQ_API_KEY:
-    raise RuntimeError("Missing GROQ_API_KEY")
-
+    raise RuntimeError(
+        "Missing GROQ_API_KEY environment variable"
+    )
 
 
 TOP_K = 4
-
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
-
-# =========================
-# CLIENTS
-# =========================
-
+# ---------------- CLIENTS ----------------
 
 supabase = create_client(
     SUPABASE_URL,
@@ -63,63 +55,38 @@ supabase = create_client(
 )
 
 
-groq_client = Groq(
+embedder = SentenceTransformer(
+    EMBED_MODEL
+)
+
+
+client = Groq(
     api_key=GROQ_API_KEY
 )
 
 
-
-# Lazy loading to prevent startup OOM
-
-embedder = None
-
-
-def get_embedder():
-
-    global embedder
-
-
-    if embedder is None:
-
-        print("Loading embedding model...")
-
-
-        embedder = SentenceTransformer(
-            EMBED_MODEL,
-            device="cpu"
-        )
-
-
-        print("Embedding model loaded")
-
-
-    return embedder
-
-
-
-# =========================
-# PROMPT
-# =========================
-
+# ---------------- PROMPT ----------------
 
 SYSTEM_PROMPT = """
 You are a helpful assistant answering questions based only on the provided documents.
 
-Rules:
-1. Use ONLY the provided context.
-2. Understand different wording and synonyms.
-3. If the answer exists in the context, explain it clearly.
-4. Do not say you cannot find information if the answer is available with different wording.
-5. Only say "I couldn't find this information in the documents" when the context does not contain the answer.
-6. Never invent information.
+Instructions:
+- Use the provided context to answer.
+- The user may ask the same information using different wording.
+- If the context contains the answer, explain it naturally.
+- Do not require exact keyword matching.
+- If the information is partially available, answer using the available information.
+- Only say "I couldn't find this information" if the context truly does not contain the answer.
+
+Context:
+{context}
+
+Question:
+{question}
 """
 
 
-
-# =========================
-# APP
-# =========================
-
+# ---------------- APP ----------------
 
 app = FastAPI(
     title="RAG API",
@@ -135,51 +102,21 @@ app.add_middleware(
 )
 
 
-
-# =========================
-# SCHEMAS
-# =========================
+# ---------------- SCHEMAS ----------------
 
 
 class AskRequest(BaseModel):
-
     question: str
-
     history: Optional[List[dict]] = None
 
 
-
 class AskResponse(BaseModel):
-
     answer: str
-
     sources: List[str]
 
 
 
-# =========================
-# EMBEDDING
-# =========================
-
-
-def embed_query(query: str):
-
-    model = get_embedder()
-
-
-    embedding = model.encode(
-        "query: " + query,
-        normalize_embeddings=True
-    )
-
-
-    return embedding.tolist()
-
-
-
-# =========================
-# RETRIEVAL
-# =========================
+# ---------------- RAG FUNCTIONS ----------------
 
 
 def retrieve_context(
@@ -187,22 +124,9 @@ def retrieve_context(
     top_k: int = TOP_K
 ):
 
-    print("Creating embedding...")
-
-
-    query_embedding = embed_query(
-        query
-    )
-
-
-    print(
-        "Embedding size:",
-        len(query_embedding)
-    )
-
-
-    print(
-        "Searching Supabase..."
+    query_embedding = (
+        embedder.encode(query)
+        .tolist()
     )
 
 
@@ -210,78 +134,56 @@ def retrieve_context(
         "match_documents",
         {
             "query_embedding": query_embedding,
-            "match_count": top_k
-        }
+            "match_count": top_k,
+        },
     ).execute()
 
 
-    chunks = result.data or []
+    return result.data or []
 
-
-    print(
-        "Retrieved chunks:",
-        len(chunks)
-    )
-
-
-    return chunks
-
-
-
-# =========================
-# MESSAGE BUILDER
-# =========================
 
 
 def build_messages(
-    question,
-    chunks,
+    question: str,
+    chunks: list,
     history=None
 ):
-
 
     context = "\n\n".join(
         [
             f"""
 Source:
-{chunk['metadata'].get('source')}
+{c['metadata'].get('source')}
 
 Content:
-{chunk['content']}
+{c['content']}
 """
-            for chunk in chunks
+            for c in chunks
         ]
     )
 
 
     messages = [
-
         {
             "role": "system",
             "content": SYSTEM_PROMPT
         }
-
     ]
 
 
+    # only add valid history messages
     if history:
+        valid_history = [
+            msg for msg in history
+            if msg.get("role") and msg.get("content")
+        ]
 
-        messages.extend(
-            [
-                msg
-                for msg in history
-                if msg.get("role")
-                and msg.get("content")
-            ]
-        )
-
+        messages.extend(valid_history)
 
 
     messages.append(
-
         {
             "role": "user",
-
             "content": f"""
 Context:
 
@@ -289,14 +191,12 @@ Context:
 
 
 Question:
-
 {question}
 
 
 Answer using only the context.
 """
         }
-
     )
 
 
@@ -304,22 +204,16 @@ Answer using only the context.
 
 
 
-# =========================
-# ROUTES
-# =========================
+# ---------------- ROUTES ----------------
 
 
 @app.get("/")
 def health_check():
 
     return {
-
         "status": "ok",
-
         "message": "RAG API running"
-
     }
-
 
 
 
@@ -329,133 +223,85 @@ def health_check():
 )
 def ask(request: AskRequest):
 
+    chunks = retrieve_context(
+        request.question
+    )
+
+
+    if not chunks:
+
+        return AskResponse(
+            answer="I couldn't find this information in the documents.",
+            sources=[]
+        )
+
+
+    messages = build_messages(
+        request.question,
+        chunks,
+        request.history
+    )
+
+
+    sources = list(
+        {
+            c["metadata"].get(
+                "source",
+                "unknown"
+            )
+            for c in chunks
+        }
+    )
+
 
     try:
 
-
-        print(
-            "Question:",
-            request.question
-        )
-
-
-        chunks = retrieve_context(
-            request.question
-        )
-
-
-        if not chunks:
-
-            return AskResponse(
-
-                answer="I couldn't find this information in the documents.",
-
-                sources=[]
-
-            )
-
-
-
-        messages = build_messages(
-
-            request.question,
-
-            chunks,
-
-            request.history
-
-        )
-
-
-
-        sources = list(
-
-            {
-                c["metadata"].get(
-                    "source",
-                    "unknown"
-                )
-
-                for c in chunks
-
-            }
-
-        )
-
-
-
-        print(
-            "Calling Groq..."
-        )
-
-
-        response = groq_client.chat.completions.create(
-
+        response = client.chat.completions.create(
             model=MODEL_ID,
-
             messages=messages,
-
             max_tokens=800,
-
-            temperature=0.3
-
+            temperature=0.3,
         )
 
 
-        answer = response.choices[0].message.content
-
-
-
-        return AskResponse(
-
-            answer=answer,
-
-            sources=sources
-
+        answer = (
+            response
+            .choices[0]
+            .message
+            .content
         )
-
 
 
     except Exception as e:
 
-
-        print(
-            "FULL ERROR:",
-            repr(e)
-        )
-
+        print("GROQ ERROR:", e)
 
         return AskResponse(
-
-            answer=f"Server error: {str(e)}",
-
-            sources=[]
-
+            answer=f"Model service error: {str(e)}",
+            sources=sources
         )
 
 
+    return AskResponse(
+        answer=answer,
+        sources=sources
+    )
 
-# =========================
-# START SERVER
-# =========================
 
+
+# ---------------- START SERVER ----------------
 
 if __name__ == "__main__":
 
     import uvicorn
 
-
     uvicorn.run(
-
         "app:app",
-
         host="0.0.0.0",
-
         port=int(
             os.getenv(
                 "PORT",
                 8000
             )
         )
-
     )
