@@ -43,7 +43,7 @@ if not GROQ_API_KEY:
     )
 
 
-TOP_K = 4
+TOP_K = 8
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
