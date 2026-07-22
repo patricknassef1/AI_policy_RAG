@@ -3,14 +3,13 @@ app.py - FastAPI RAG API
 """
 
 import os
-import math
 from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from huggingface_hub import InferenceClient
+from sentence_transformers import SentenceTransformer
 from supabase import create_client
 from groq import Groq
 
@@ -18,31 +17,56 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 # ---------------- CONFIG ----------------
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
 
-MODEL_ID = os.getenv("GROQ_MODEL_ID", "llama-3.3-70b-versatile")
+MODEL_ID = os.getenv(
+    "GROQ_MODEL_ID",
+    "llama-3.3-70b-versatile"
+)
+
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY environment variables")
-if not GROQ_API_KEY:
-    raise RuntimeError("Missing GROQ_API_KEY environment variable")
-if not HF_TOKEN:
-    raise RuntimeError("Missing HF_TOKEN environment variable")
+    raise RuntimeError(
+        "Missing SUPABASE_URL or SUPABASE_KEY environment variables"
+    )
 
-TOP_K = 8
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "Missing GROQ_API_KEY environment variable"
+    )
+
+
+TOP_K = 4
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
+
 # ---------------- CLIENTS ----------------
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-hf_client = InferenceClient(token=HF_TOKEN, timeout=30)
-groq_client = Groq(api_key=GROQ_API_KEY)
+
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
+)
+
+
+embedder = SentenceTransformer(
+    EMBED_MODEL
+)
+
+
+client = Groq(
+    api_key=GROQ_API_KEY
+)
+
 
 # ---------------- PROMPT ----------------
+
 SYSTEM_PROMPT = """
 You are a helpful assistant answering questions based on the provided documents.
 
@@ -56,7 +80,12 @@ Rules:
 """
 
 # ---------------- APP ----------------
-app = FastAPI(title="RAG API", description="Retrieval Augmented Generation API")
+
+app = FastAPI(
+    title="RAG API",
+    description="Retrieval Augmented Generation API"
+)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,107 +94,207 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ---------------- SCHEMAS ----------------
+
+
 class AskRequest(BaseModel):
     question: str
     history: Optional[List[dict]] = None
+
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]
 
-# ---------------- HELPER: EMBEDDING ----------------
-def l2_normalize(vec: List[float]) -> List[float]:
-    norm = math.sqrt(sum(x * x for x in vec))
-    if norm == 0:
-        return vec
-    return [x / norm for x in vec]
 
-def embed_query(query: str) -> List[float]:
-    """
-    Embed a query using the same BGE model as ingest.py.
-    - Adds the 'query: ' prefix recommended for BGE.
-    - Pools token embeddings by averaging.
-    - L2-normalizes the result to match the stored embeddings.
-    """
-    # BGE models expect the 'query: ' prefix for retrieval queries
-    prefixed = f"query: {query}"
-    result = hf_client.feature_extraction([prefixed], model=EMBED_MODEL)
-    # result is a list of embeddings (one per input)
-    vec = result[0]
-
-    # If the model returns per-token embeddings, average them.
-    if isinstance(vec[0], list):
-        pooled = [sum(col) / len(col) for col in zip(*vec)]
-    else:
-        pooled = list(vec)
-
-    return l2_normalize(pooled)
 
 # ---------------- RAG FUNCTIONS ----------------
-def retrieve_context(query: str, top_k: int = TOP_K) -> List[dict]:
-    query_embedding = embed_query(query)
-    result = supabase.rpc(
-        "match_documents",
-        {"query_embedding": query_embedding, "match_count": top_k},
-    ).execute()
-    return result.data or []
 
-def build_messages(question: str, chunks: list, history: Optional[List[dict]] = None) -> list:
-    context = "\n\n".join(
-        f"Source:\n{c['metadata'].get('source', 'unknown')}\n\nContent:\n{c['content']}"
-        for c in chunks
+
+def retrieve_context(
+    query: str,
+    top_k: int = TOP_K
+):
+
+    query_embedding = (
+        embedder.encode(query)
+        .tolist()
     )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+    result = supabase.rpc(
+        "match_documents",
+        {
+            "query_embedding": query_embedding,
+            "match_count": top_k,
+        },
+    ).execute()
+
+
+    return result.data or []
+
+
+
+def build_messages(
+    question: str,
+    chunks: list,
+    history=None
+):
+
+    context = "\n\n".join(
+        [
+            f"""
+Source:
+{c['metadata'].get('source')}
+
+Content:
+{c['content']}
+"""
+            for c in chunks
+        ]
+    )
+
+
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
+
+
+    # only add valid history messages
     if history:
-        valid_history = [msg for msg in history if msg.get("role") and msg.get("content")]
+        valid_history = [
+            msg for msg in history
+            if msg.get("role") and msg.get("content")
+        ]
+
         messages.extend(valid_history)
 
-    messages.append({
-        "role": "user",
-        "content": f"Context:\n\n{context}\n\nQuestion:\n{question}\n\nAnswer using only the context."
-    })
+
+    messages.append(
+        {
+            "role": "user",
+            "content": f"""
+Context:
+
+{context}
+
+
+Question:
+{question}
+
+
+Answer using only the context.
+"""
+        }
+    )
+
+
     return messages
 
+
+
 # ---------------- ROUTES ----------------
+
+
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "RAG API running"}
 
-@app.post("/ask", response_model=AskResponse)
+    return {
+        "status": "ok",
+        "message": "RAG API running"
+    }
+
+
+
+@app.post(
+    "/ask",
+    response_model=AskResponse
+)
 def ask(request: AskRequest):
-    chunks = retrieve_context(request.question)
+
+    chunks = retrieve_context(
+        request.question
+    )
+
 
     if not chunks:
+
         return AskResponse(
             answer="I couldn't find this information in the documents.",
             sources=[]
         )
 
-    messages = build_messages(request.question, chunks, request.history)
 
-    sources = list({c["metadata"].get("source", "unknown") for c in chunks})
+    messages = build_messages(
+        request.question,
+        chunks,
+        request.history
+    )
+
+
+    sources = list(
+        {
+            c["metadata"].get(
+                "source",
+                "unknown"
+            )
+            for c in chunks
+        }
+    )
+
 
     try:
-        response = groq_client.chat.completions.create(
+
+        response = client.chat.completions.create(
             model=MODEL_ID,
             messages=messages,
             max_tokens=800,
             temperature=0.3,
         )
-        answer = response.choices[0].message.content
+
+
+        answer = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
+
+
     except Exception as e:
+
         print("GROQ ERROR:", e)
+
         return AskResponse(
             answer=f"Model service error: {str(e)}",
             sources=sources
         )
 
-    return AskResponse(answer=answer, sources=sources)
+
+    return AskResponse(
+        answer=answer,
+        sources=sources
+    )
+
+
 
 # ---------------- START SERVER ----------------
+
 if __name__ == "__main__":
+
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=int(
+            os.getenv(
+                "PORT",
+                8000
+            )
+        )
+    )
