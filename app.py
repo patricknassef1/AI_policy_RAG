@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from sentence_transformers import SentenceTransformer
 from supabase import create_client
-from huggingface_hub import InferenceClient
+from groq import Groq
 
 from dotenv import load_dotenv
 
@@ -23,11 +23,11 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-HF_TOKEN = os.getenv("HF_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 MODEL_ID = os.getenv(
-    "MODEL_ID",
-    "meta-llama/Llama-3.1-8B-Instruct"
+    "GROQ_MODEL_ID",
+    "llama-3.3-70b-versatile"
 )
 
 
@@ -37,9 +37,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     )
 
 
-if not HF_TOKEN:
+if not GROQ_API_KEY:
     raise RuntimeError(
-        "Missing HF_TOKEN environment variable"
+        "Missing GROQ_API_KEY environment variable"
     )
 
 
@@ -60,8 +60,8 @@ embedder = SentenceTransformer(
 )
 
 
-client = InferenceClient(
-    api_key=HF_TOKEN
+client = Groq(
+    api_key=GROQ_API_KEY
 )
 
 
@@ -266,7 +266,7 @@ def ask(request: AskRequest):
 
     except Exception as e:
 
-        print("HUGGINGFACE ERROR:", e)
+        print("GROQ ERROR:", e)
 
         return AskResponse(
             answer=f"Model service error: {str(e)}",
