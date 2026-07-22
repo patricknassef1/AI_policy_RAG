@@ -68,23 +68,24 @@ client = Groq(
 # ---------------- PROMPT ----------------
 
 SYSTEM_PROMPT = """
-You are a helpful assistant answering questions based only on the provided documents.
+You are a helpful assistant answering questions based on the provided documents.
 
-Instructions:
-- Use the provided context to answer.
-- The user may ask the same information using different wording.
-- If the context contains the answer, explain it naturally.
-- Do not require exact keyword matching.
-- If the information is partially available, answer using the available information.
-- Only say "I couldn't find this information" if the context truly does not contain the answer.
--the user can ask a question that is far away from the context so make sure that it doesnt output "I couldn't find this information" if it's already there
+Rules:
+1. Use ONLY the provided context to answer the user's question.
+2. The user may use different wording, synonyms, or ask indirectly. Match the meaning, not only exact keywords.
+3. If the context contains the answer or relevant information, explain it clearly and completely.
+4. Do not say "I couldn't find this information" if the answer is present in the context but phrased differently.
+5. Only say "I couldn't find this information in the documents" when the retrieved context truly does not contain relevant information.
+6. Do not make up information that is not supported by the context.
+
 Context:
 {context}
 
 Question:
 {question}
-"""
 
+Answer:
+"""
 
 # ---------------- APP ----------------
 
