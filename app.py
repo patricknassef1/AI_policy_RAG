@@ -44,7 +44,7 @@ if not GROQ_API_KEY:
 
 
 TOP_K = 4
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+EMBED_MODEL = "all-MiniLM-L6-v2"
 
 
 # ---------------- CLIENTS ----------------
