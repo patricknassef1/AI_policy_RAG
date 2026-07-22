@@ -109,7 +109,6 @@ class AskRequest(BaseModel):
     question: str
     history: Optional[List[dict]] = None
 
-
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]
@@ -119,30 +118,29 @@ class AskResponse(BaseModel):
 # ---------------- RAG FUNCTIONS ----------------
 
 
-def retrieve_context(
-    query: str,
-    top_k: int = TOP_K
-):
+def retrieve_context(query: str, top_k: int = TOP_K):
 
-    query_embedding = (
-        embedder.encode(query)
-        .tolist()
+    embedding = embedder.encode(
+        query,
+        normalize_embeddings=True
     )
 
+    query_embedding = embedding.tolist()
 
-    result = supabase.rpc(
-        "match_documents",
-        {
-            "query_embedding": query_embedding,
-            "match_count": top_k,
-        },
-    ).execute()
+    try:
+        result = supabase.rpc(
+            "match_documents",
+            {
+                "query_embedding": query_embedding,
+                "match_count": top_k
+            }
+        ).execute()
 
+        return result.data or []
 
-    return result.data or []
-
-
-
+    except Exception as e:
+        print("SUPABASE ERROR:", e)
+        raise e
 def build_messages(
     question: str,
     chunks: list,
@@ -171,14 +169,20 @@ Content:
     ]
 
 
-    # only add valid history messages
+    # Add conversation history safely
     if history:
-        valid_history = [
-            msg for msg in history
-            if msg.get("role") and msg.get("content")
-        ]
-
-        messages.extend(valid_history)
+        for msg in history:
+            if (
+                isinstance(msg, dict)
+                and msg.get("role")
+                and msg.get("content")
+            ):
+                messages.append(
+                    {
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    }
+                )
 
 
     messages.append(
@@ -201,8 +205,6 @@ Answer using only the context.
 
 
     return messages
-
-
 
 # ---------------- ROUTES ----------------
 
