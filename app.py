@@ -68,13 +68,21 @@ client = Groq(
 # ---------------- PROMPT ----------------
 
 SYSTEM_PROMPT = """
-You are a helpful assistant that answers questions only using the provided context.
+You are a helpful assistant answering questions based only on the provided documents.
 
-Rules:
-- Do not use outside knowledge.
-- Do not invent information.
-- If the answer is not in the context, say you do not know.
-- Be concise and clear.
+Instructions:
+- Use the provided context to answer.
+- The user may ask the same information using different wording.
+- If the context contains the answer, explain it naturally.
+- Do not require exact keyword matching.
+- If the information is partially available, answer using the available information.
+- Only say "I couldn't find this information" if the context truly does not contain the answer.
+
+Context:
+{context}
+
+Question:
+{question}
 """
 
 
