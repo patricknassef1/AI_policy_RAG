@@ -3,6 +3,7 @@ app.py - FastAPI RAG API
 """
 
 import os
+import traceback
 from typing import List, Optional
 
 from fastapi import FastAPI
@@ -18,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -30,24 +31,25 @@ MODEL_ID = os.getenv(
     "llama-3.3-70b-versatile"
 )
 
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "Missing SUPABASE_URL or SUPABASE_KEY environment variables"
-    )
-
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "Missing GROQ_API_KEY environment variable"
-    )
-
-
 TOP_K = 4
+
+# Must match your Supabase vector dimension
 EMBED_MODEL = "all-MiniLM-L6-v2"
 
 
-# ---------------- CLIENTS ----------------
+# ================= ENV CHECK =================
+
+if not SUPABASE_URL:
+    raise RuntimeError("Missing SUPABASE_URL")
+
+if not SUPABASE_KEY:
+    raise RuntimeError("Missing SUPABASE_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("Missing GROQ_API_KEY")
+
+
+# ================= CLIENTS =================
 
 supabase = create_client(
     SUPABASE_URL,
@@ -60,33 +62,28 @@ embedder = SentenceTransformer(
 )
 
 
-client = Groq(
+groq_client = Groq(
     api_key=GROQ_API_KEY
 )
 
 
-# ---------------- PROMPT ----------------
+# ================= PROMPT =================
 
 SYSTEM_PROMPT = """
 You are a helpful assistant answering questions based only on the provided documents.
 
-Instructions:
-- Use the provided context to answer.
-- The user may ask the same information using different wording.
-- If the context contains the answer, explain it naturally.
-- Do not require exact keyword matching.
-- If the information is partially available, answer using the available information.
-- Only say "I couldn't find this information" if the context truly does not contain the answer.
-
-Context:
-{context}
-
-Question:
-{question}
+Rules:
+1. Use only the provided context.
+2. The user may ask questions using different wording.
+3. Match the meaning, not only exact keywords.
+4. If the answer exists in the context, explain it clearly.
+5. If information is partially available, provide the available information.
+6. Do not invent information.
+7. Only say "I couldn't find this information in the documents" when the context truly does not contain the answer.
 """
 
 
-# ---------------- APP ----------------
+# ================= APP =================
 
 app = FastAPI(
     title="RAG API",
@@ -97,17 +94,20 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ---------------- SCHEMAS ----------------
+# ================= SCHEMAS =================
 
 
 class AskRequest(BaseModel):
     question: str
     history: Optional[List[dict]] = None
+
+
 
 class AskResponse(BaseModel):
     answer: str
@@ -115,20 +115,33 @@ class AskResponse(BaseModel):
 
 
 
-# ---------------- RAG FUNCTIONS ----------------
+# ================= EMBEDDING =================
 
 
-def retrieve_context(query: str, top_k: int = TOP_K):
+def create_embedding(text: str):
 
     embedding = embedder.encode(
-        query,
+        text,
         normalize_embeddings=True
     )
 
-    query_embedding = embedding.tolist()
+    return embedding.tolist()
+
+
+
+# ================= RETRIEVAL =================
+
+
+def retrieve_context(
+    query: str,
+    top_k: int = TOP_K
+):
+
+    query_embedding = create_embedding(query)
 
     try:
-        result = supabase.rpc(
+
+        response = supabase.rpc(
             "match_documents",
             {
                 "query_embedding": query_embedding,
@@ -136,28 +149,64 @@ def retrieve_context(query: str, top_k: int = TOP_K):
             }
         ).execute()
 
-        return result.data or []
+
+        return response.data or []
+
 
     except Exception as e:
-        print("SUPABASE ERROR:", e)
+
+        print("SUPABASE ERROR")
+        traceback.print_exc()
+
         raise e
+
+
+
+# ================= MESSAGE BUILDER =================
+
+
 def build_messages(
     question: str,
     chunks: list,
     history=None
 ):
 
-    context = "\n\n".join(
-        [
+    context_parts = []
+
+
+    for chunk in chunks:
+
+        metadata = chunk.get(
+            "metadata",
+            {}
+        ) or {}
+
+
+        source = metadata.get(
+            "source",
+            "unknown"
+        )
+
+
+        content = chunk.get(
+            "content",
+            ""
+        )
+
+
+        context_parts.append(
             f"""
 Source:
-{c['metadata'].get('source')}
+{source}
 
 Content:
-{c['content']}
+{content}
 """
-            for c in chunks
-        ]
+        )
+
+
+    context = "\n\n".join(
+        context_parts
     )
 
 
@@ -169,14 +218,17 @@ Content:
     ]
 
 
-    # Add conversation history safely
+    # Add previous chat safely
     if history:
+
         for msg in history:
+
             if (
                 isinstance(msg, dict)
                 and msg.get("role")
                 and msg.get("content")
             ):
+
                 messages.append(
                     {
                         "role": msg["role"],
@@ -195,6 +247,7 @@ Context:
 
 
 Question:
+
 {question}
 
 
@@ -206,7 +259,9 @@ Answer using only the context.
 
     return messages
 
-# ---------------- ROUTES ----------------
+
+
+# ================= ROUTES =================
 
 
 @app.get("/")
@@ -223,46 +278,62 @@ def health_check():
     "/ask",
     response_model=AskResponse
 )
-def ask(request: AskRequest):
-
-    chunks = retrieve_context(
-        request.question
-    )
-
-
-    if not chunks:
-
-        return AskResponse(
-            answer="I couldn't find this information in the documents.",
-            sources=[]
-        )
-
-
-    messages = build_messages(
-        request.question,
-        chunks,
-        request.history
-    )
-
-
-    sources = list(
-        {
-            c["metadata"].get(
-                "source",
-                "unknown"
-            )
-            for c in chunks
-        }
-    )
-
+def ask(
+    request: AskRequest
+):
 
     try:
 
-        response = client.chat.completions.create(
+        # 1. Retrieve documents
+
+        chunks = retrieve_context(
+            request.question
+        )
+
+
+        if not chunks:
+
+            return AskResponse(
+                answer="I couldn't find this information in the documents.",
+                sources=[]
+            )
+
+
+        # 2. Build prompt
+
+        messages = build_messages(
+            request.question,
+            chunks,
+            request.history
+        )
+
+
+        # 3. Extract sources
+
+        sources = list(
+            {
+                (
+                    c.get("metadata", {}) or {}
+                ).get(
+                    "source",
+                    "unknown"
+                )
+                for c in chunks
+            }
+        )
+
+
+        # 4. Call LLM
+
+        response = groq_client.chat.completions.create(
+
             model=MODEL_ID,
+
             messages=messages,
-            max_tokens=800,
-            temperature=0.3,
+
+            max_tokens=500,
+
+            temperature=0.2
         )
 
 
@@ -274,32 +345,42 @@ def ask(request: AskRequest):
         )
 
 
-    except Exception as e:
-
-        print("GROQ ERROR:", e)
-
         return AskResponse(
-            answer=f"Model service error: {str(e)}",
+            answer=answer,
             sources=sources
         )
 
 
-    return AskResponse(
-        answer=answer,
-        sources=sources
-    )
+    except Exception as e:
+
+
+        print("APPLICATION ERROR:")
+        traceback.print_exc()
+
+
+        return AskResponse(
+
+            answer=f"Server error: {str(e)}",
+
+            sources=[]
+        )
 
 
 
-# ---------------- START SERVER ----------------
+# ================= START =================
+
 
 if __name__ == "__main__":
 
     import uvicorn
 
+
     uvicorn.run(
+
         "app:app",
+
         host="0.0.0.0",
+
         port=int(
             os.getenv(
                 "PORT",
