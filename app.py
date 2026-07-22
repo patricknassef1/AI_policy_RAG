@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from sentence_transformers import SentenceTransformer
+from huggingface_hub import InferenceClient
 from supabase import create_client
 from groq import Groq
 
@@ -24,6 +24,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 MODEL_ID = os.getenv(
     "GROQ_MODEL_ID",
@@ -43,6 +44,12 @@ if not GROQ_API_KEY:
     )
 
 
+if not HF_TOKEN:
+    raise RuntimeError(
+        "Missing HF_TOKEN environment variable"
+    )
+
+
 TOP_K = 8
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
@@ -55,8 +62,8 @@ supabase = create_client(
 )
 
 
-embedder = SentenceTransformer(
-    EMBED_MODEL
+hf_client = InferenceClient(
+    token=HF_TOKEN
 )
 
 
@@ -112,15 +119,21 @@ class AskResponse(BaseModel):
 # ---------------- RAG FUNCTIONS ----------------
 
 
+def embed_query(query: str) -> list:
+    result = hf_client.feature_extraction([query], model=EMBED_MODEL)
+    vec = result[0]
+    if isinstance(vec[0], list):
+        # average-pool per-token embeddings if the provider returns those
+        return [sum(col) / len(col) for col in zip(*vec)]
+    return list(vec)
+
+
 def retrieve_context(
     query: str,
     top_k: int = TOP_K
 ):
 
-    query_embedding = (
-        embedder.encode(query)
-        .tolist()
-    )
+    query_embedding = embed_query(query)
 
 
     result = supabase.rpc(
